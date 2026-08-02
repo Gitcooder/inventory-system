@@ -29,7 +29,7 @@ export class AuthController {
     res.cookie(REFRESH_COOKIE, token, {
       httpOnly: true,
       secure: this.config.get('NODE_ENV') === 'production',
-      sameSite: 'lax',
+      sameSite: this.config.get('NODE_ENV') === 'production' ? 'none' : 'lax',
       path: '/api/auth', // only sent to auth endpoints, not the whole API surface
       expires: expiresAt,
     });
