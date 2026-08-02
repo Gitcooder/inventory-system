@@ -1,0 +1,19 @@
+{
+  "name": "inventory-system",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:infra": "docker compose up -d postgres redis",
+    "dev:api": "npm run start:dev --workspace=api",
+    "dev:web": "npm run dev --workspace=web",
+    "prisma:generate": "npm exec -w api -- prisma generate",
+    "prisma:migrate": "npm exec -w api -- prisma migrate dev",
+    "seed": "npm run seed --workspace=api",
+    "build": "npm run build --workspace=api && npm run build --workspace=web",
+    "lint": "npm run lint --workspace=api && npm run lint --workspace=web",
+    "test": "npm run test --workspace=api"
+  }
+}

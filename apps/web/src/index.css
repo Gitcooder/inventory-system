@@ -1,0 +1,53 @@
+:root {
+  color-scheme: light;
+
+  /* Muted teal/clinical palette — deliberately not the terracotta/cream or
+     near-black/acid defaults; this is a daily-use data tool, not a landing
+     page, so it favors calm and legibility over a "signature" moment. */
+  --color-bg: #f6f7f6;
+  --color-surface: #ffffff;
+  --color-border: #dfe3e0;
+  --color-text: #1c2321;
+  --color-text-muted: #62706b;
+  --color-accent: #2f6f5e;
+  --color-accent-hover: #255a4d;
+  --color-danger: #a8432b;
+  --color-danger-hover: #8a3623;
+
+  --font-sans: ui-sans-serif, system-ui, 'Segoe UI', sans-serif;
+  --font-mono: ui-monospace, 'SFMono-Regular', Menlo, Consolas, monospace;
+
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-5: 24px;
+  --space-6: 32px;
+
+  --radius: 8px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+}
+
+/* Visible keyboard focus everywhere, not just on links/buttons — an admin
+   tool is used with a keyboard as much as a mouse. */
+:focus-visible {
+  outline: 2px solid var(--color-accent);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

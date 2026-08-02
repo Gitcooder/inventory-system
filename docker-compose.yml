@@ -1,0 +1,65 @@
+name: inventory-system
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: inventory
+      POSTGRES_PASSWORD: inventory
+      POSTGRES_DB: inventory_dev
+    ports:
+      - '5432:5432'
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U inventory']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    ports:
+      - '6379:6379'
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # api and web run via `npm run dev` on the host during day-to-day
+  # development (faster iteration, no rebuild-on-change). These two services
+  # are for Phase 8 deployment / "run the whole stack in Docker" scenarios —
+  # uncomment to use them. Build context is deliberately the repo root (`.`),
+  # not apps/api or apps/web, because this is an npm workspaces monorepo —
+  # see the comment at the top of each Dockerfile for why.
+
+  # api:
+  #   build:
+  #     context: .
+  #     dockerfile: apps/api/Dockerfile
+  #   env_file: ./apps/api/.env
+  #   depends_on:
+  #     postgres:
+  #       condition: service_healthy
+  #     redis:
+  #       condition: service_healthy
+  #   ports:
+  #     - '3000:3000'
+
+  # web:
+  #   build:
+  #     context: .
+  #     dockerfile: apps/web/Dockerfile
+  #     args:
+  #       VITE_API_URL: http://localhost:3000/api
+  #       VITE_WS_URL: http://localhost:3000
+  #   ports:
+  #     - '8080:80'
+  #   depends_on:
+  #     - api
+
+volumes:
+  postgres_data:

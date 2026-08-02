@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: inventory
+          POSTGRES_PASSWORD: inventory
+          POSTGRES_DB: inventory_test
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U inventory"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports: ['6379:6379']
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      DATABASE_URL: postgresql://inventory:inventory@localhost:5432/inventory_test
+      REDIS_URL: redis://localhost:6379
+      JWT_ACCESS_SECRET: ci-only-secret-not-for-production
+      NODE_ENV: test
+      SEED_ADMIN_EMAIL: admin@example.com
+      SEED_ADMIN_PASSWORD: ChangeMe123!
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Unlike the sandbox this scaffold was authored in, a real GitHub
+      # Actions runner has normal internet access, so this actually reaches
+      # Prisma's engine-binary CDN and produces a fully-typed client — which
+      # is also what clears every no-unsafe-* lint warning documented
+      # throughout this repo's README.
+      - name: Generate Prisma client
+        working-directory: apps/api
+        run: npx prisma generate
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Build
+        run: npm run build
+
+      - name: Run database migrations
+        working-directory: apps/api
+        run: npx prisma migrate deploy
+
+      - name: Seed
+        working-directory: apps/api
+        run: npm run seed
+
+      - name: Unit tests
+        run: npm run test --workspace=api
+
+      - name: End-to-end tests
+        working-directory: apps/api
+        run: npm run test:e2e

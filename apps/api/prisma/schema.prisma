@@ -1,0 +1,375 @@
+// Prisma schema — Phase 1 (Identity & RBAC) + Phase 2 (Catalog) + Phase 3 (Stock)
+//                + Phase 4 (Dispensing) + Phase 5 (Real-time alerts) + Phase 6 (Customer/Reviews)
+//                + Phase 7 (Audit log & reporting)
+// See /docs/architecture.md for the full design rationale.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           Int       @id @default(autoincrement())
+  name         String
+  email        String    @unique
+  passwordHash String    @map("password_hash")
+  phone        String?
+  isActive     Boolean   @default(true) @map("is_active")
+  createdAt    DateTime  @default(now()) @map("created_at")
+  updatedAt    DateTime  @updatedAt @map("updated_at")
+
+  roles         UserRole[]
+  refreshTokens RefreshToken[]
+  stockAdjustments StockAdjustment[]
+  usageLogs        UsageLog[]
+  acknowledgedAlerts AlertLog[]
+  reviews            ProductReview[]
+  auditLogs          AuditLog[]
+
+  @@map("users")
+}
+
+model Role {
+  id          Int    @id @default(autoincrement())
+  name        String @unique
+  description String?
+
+  users       UserRole[]
+  permissions RolePermission[]
+
+  @@map("roles")
+}
+
+model Permission {
+  id          Int    @id @default(autoincrement())
+  code        String @unique // e.g. 'stock:adjust', 'product:create'
+  description String?
+
+  roles RolePermission[]
+
+  @@map("permissions")
+}
+
+model UserRole {
+  userId Int @map("user_id")
+  roleId Int @map("role_id")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@id([userId, roleId])
+  @@map("user_roles")
+}
+
+model RolePermission {
+  roleId       Int @map("role_id")
+  permissionId Int @map("permission_id")
+
+  role       Role       @relation(fields: [roleId], references: [id], onDelete: Cascade)
+  permission Permission @relation(fields: [permissionId], references: [id], onDelete: Cascade)
+
+  @@id([roleId, permissionId])
+  @@map("role_permissions")
+}
+
+// Refresh tokens are stored hashed and rotated on every use (see AuthService).
+// The id is an app-generated UUID (crypto.randomUUID()), not an autoincrement
+// int — it doubles as the public, non-guessable half of the `id.secret` token
+// pair sent to the client, so it can't be sequential.
+// If a token is presented that's already revoked, every token for that user
+// is revoked too — that only happens if a refresh token leaked and got used
+// out of order, so it's treated as a compromise signal.
+model RefreshToken {
+  id        String    @id
+  userId    Int       @map("user_id")
+  tokenHash String    @map("token_hash")
+  expiresAt DateTime  @map("expires_at")
+  revokedAt DateTime? @map("revoked_at")
+  createdAt DateTime  @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("refresh_tokens")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Phase 2: Catalog
+// ─────────────────────────────────────────────────────────────
+
+model Brand {
+  id   Int    @id @default(autoincrement())
+  name String @unique
+
+  products Product[]
+
+  @@map("brands")
+}
+
+model Category {
+  id               Int     @id @default(autoincrement())
+  name             String
+  description      String?
+  parentCategoryId Int?    @map("parent_category_id")
+
+  // SetNull, not Cascade: deleting a parent category shouldn't wipe out its
+  // children's product assignments — they just become top-level categories.
+  parent   Category?  @relation("CategoryHierarchy", fields: [parentCategoryId], references: [id], onDelete: SetNull)
+  children Category[] @relation("CategoryHierarchy")
+  products Product[]
+
+  @@unique([name, parentCategoryId])
+  @@map("categories")
+}
+
+model Location {
+  id               Int     @id @default(autoincrement())
+  name             String
+  type             String // 'warehouse' | 'aisle' | 'shelf' | 'branch' — validated at the DTO layer, not the DB, since the list may grow
+  parentLocationId Int?    @map("parent_location_id")
+  address          String?
+
+  parent   Location?  @relation("LocationHierarchy", fields: [parentLocationId], references: [id], onDelete: SetNull)
+  children Location[] @relation("LocationHierarchy")
+
+  inventoryStocks  InventoryStock[]
+  stockAdjustments StockAdjustment[]
+  usageLogs        UsageLog[]
+  alertLogs        AlertLog[]
+
+  @@unique([name, parentLocationId])
+  @@map("locations")
+}
+
+model Product {
+  id              Int      @id @default(autoincrement())
+  skuCode         String   @unique @map("sku_code")
+  name            String
+  brandId         Int      @map("brand_id")
+  categoryId      Int      @map("category_id")
+  usesDescription String?  @map("uses_description")
+  unitOfMeasure   String?  @map("unit_of_measure")
+  isActive        Boolean  @default(true) @map("is_active")
+  createdAt       DateTime @default(now()) @map("created_at")
+  updatedAt       DateTime @updatedAt @map("updated_at")
+
+  // Restrict, not Cascade: a brand/category can't be deleted out from under
+  // products that reference it — the API surfaces that as a 409, not a silent
+  // catalog corruption. Products themselves are never hard-deleted (see
+  // ProductsService) so this only ever blocks brand/category deletion.
+  brand    Brand    @relation(fields: [brandId], references: [id], onDelete: Restrict)
+  category Category @relation(fields: [categoryId], references: [id], onDelete: Restrict)
+
+  inventoryStocks  InventoryStock[]
+  stockAdjustments StockAdjustment[]
+  usageLogs        UsageLog[]
+  alertLogs        AlertLog[]
+  reviews          ProductReview[]
+
+  @@index([brandId])
+  @@index([categoryId])
+  @@map("products")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Phase 3: Stock
+// ─────────────────────────────────────────────────────────────
+
+// No declarative CHECK(quantity >= 0) here — Prisma's schema DSL still has no
+// stable syntax for table-level CHECK constraints as of this build. Instead,
+// InventoryStockService.adjust() enforces it with an atomic conditional
+// UPDATE (`SET quantity = quantity + $delta WHERE quantity + $delta >= 0`),
+// which gives the same "never negative, no race window" guarantee as a DB
+// constraint would, and is straightforward to unit test (see
+// inventory.service.spec.ts). If you want the belt-and-suspenders DB-level
+// constraint too, add it once you have a migration history:
+//   npx prisma migrate dev --create-only --name add_stock_quantity_check
+//   -- then add to the generated migration.sql:
+//   ALTER TABLE "inventory_stocks" ADD CONSTRAINT "stock_quantity_non_negative" CHECK ("quantity" >= 0);
+model InventoryStock {
+  id             Int       @id @default(autoincrement())
+  productId      Int       @map("product_id")
+  locationId     Int       @map("location_id")
+  quantity       Int       @default(0)
+  thresholdLimit Int       @default(5) @map("threshold_limit")
+  // Not nullable, defaults to 'default': Postgres treats NULL as distinct in
+  // unique indexes, so a nullable batchNumber would silently let multiple
+  // "unbatched" stock rows exist for the same product+location. A constant
+  // sentinel keeps the uniqueness guarantee meaningful for the common
+  // (non-batch-tracked) case while still supporting real batches later.
+  batchNumber    String    @default("default") @map("batch_number")
+  expirationDate DateTime? @map("expiration_date")
+  updatedAt      DateTime  @updatedAt @map("updated_at")
+
+  // Restrict: a product/location that still holds stock can't be deleted out
+  // from under it (locations already promised this in Phase 2's delete note).
+  product  Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
+  location Location @relation(fields: [locationId], references: [id], onDelete: Restrict)
+
+  @@unique([productId, locationId, batchNumber])
+  @@index([productId])
+  @@index([locationId])
+  @@map("inventory_stocks")
+}
+
+// Insert-only from the API's perspective (no update/delete endpoint) — this
+// is the procurement/correction audit trail, distinct from Phase 4's
+// usage_logs (which records dispensing, not restocking).
+model StockAdjustment {
+  id               Int      @id @default(autoincrement())
+  productId        Int      @map("product_id")
+  locationId       Int      @map("location_id")
+  // Defaults matched to InventoryStock.batchNumber's default so an
+  // adjustment always resolves to exactly one stock row, even though the
+  // original architecture.md draft didn't carry batch on this table.
+  batchNumber      String   @default("default") @map("batch_number")
+  adjustedByUserId Int      @map("adjusted_by_user_id")
+  // 'restock' | 'correction' | 'damage' | 'expired' — validated at the DTO
+  // layer (CreateStockAdjustmentDto) rather than a DB enum, same tradeoff as
+  // Location.type in Phase 2.
+  adjustmentType   String   @map("adjustment_type")
+  quantityChange   Int      @map("quantity_change") // signed: positive for restock, negative for damage/expired, either for correction
+  reason           String?
+  timestamp        DateTime @default(now())
+
+  product    Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
+  location   Location @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  adjustedBy User     @relation(fields: [adjustedByUserId], references: [id], onDelete: Restrict)
+
+  @@index([productId])
+  @@index([locationId])
+  @@map("stock_adjustments")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Phase 4: Dispensing
+// ─────────────────────────────────────────────────────────────
+
+// Insert-only, exactly like StockAdjustment — no update/delete endpoint
+// exists for this table at all. This is the "who took what, when, for what
+// purpose" ledger the whole system is built around.
+//
+// id is Int, not BigInt as the original architecture.md draft suggested:
+// Prisma maps BigInt to JS `bigint`, which JSON.stringify can't serialize
+// without a custom replacer (NestJS's default response pipeline would throw
+// on every response containing a usage log). Int's ~2.1 billion ceiling is
+// not a real constraint for this system's timescale, and dodges that
+// footgun entirely — a deliberate simplification, not an oversight.
+model UsageLog {
+  id                 Int      @id @default(autoincrement())
+  productId          Int      @map("product_id")
+  userId             Int      @map("user_id")
+  locationId         Int      @map("location_id")
+  quantityUsed       Int      @map("quantity_used")
+  purposeDescription String?  @map("purpose_description")
+  timestamp          DateTime @default(now())
+
+  product  Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
+  user     User     @relation(fields: [userId], references: [id], onDelete: Restrict)
+  location Location @relation(fields: [locationId], references: [id], onDelete: Restrict)
+
+  @@index([productId])
+  @@index([userId])
+  @@index([locationId])
+  @@map("usage_logs")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Phase 5: Real-time alerts
+// ─────────────────────────────────────────────────────────────
+
+// A persistent record of every threshold breach, independent of whether
+// anyone was online to see the WebSocket push at the time (architecture.md
+// §6.2's lifecycle is "publish and hope someone's listening" — this table is
+// what makes the alert durable instead of ephemeral: the Admin panel can show
+// "unacknowledged alerts" on login even if the popup was missed entirely).
+model AlertLog {
+  id                   Int       @id @default(autoincrement())
+  productId            Int       @map("product_id")
+  locationId           Int       @map("location_id")
+  stockAtTrigger       Int       @map("stock_at_trigger")
+  thresholdAtTrigger   Int       @map("threshold_at_trigger")
+  triggeredAt          DateTime  @default(now()) @map("triggered_at")
+  acknowledgedByUserId Int?      @map("acknowledged_by_user_id")
+  acknowledgedAt       DateTime? @map("acknowledged_at")
+
+  product        Product  @relation(fields: [productId], references: [id], onDelete: Restrict)
+  location       Location @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  // SetNull, not Restrict: an alert shouldn't become undeletable-adjacent
+  // just because the user who acknowledged it was later removed — the alert
+  // itself is the durable record, "who closed it out" is secondary context.
+  acknowledgedBy User?    @relation(fields: [acknowledgedByUserId], references: [id], onDelete: SetNull)
+
+  @@index([productId])
+  @@index([locationId])
+  @@map("alerts_log")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Phase 6: Customer reviews
+// ─────────────────────────────────────────────────────────────
+
+// Moderation queue by design: reviews start 'pending' and only ever become
+// publicly visible once an Admin/Employee sets them to 'approved' — see
+// ReviewsService. The public GET /reviews endpoint hardcodes status=approved
+// server-side regardless of what a caller asks for, so this table's
+// pending/rejected rows are never reachable from an unauthenticated request.
+model ProductReview {
+  id         Int      @id @default(autoincrement())
+  productId  Int      @map("product_id")
+  customerId Int      @map("customer_id")
+  rating     Int // 1-5, validated at the DTO layer (see CreateReviewDto)
+  reviewText String?  @map("review_text")
+  status     String   @default("pending") // 'pending' | 'approved' | 'rejected'
+  createdAt  DateTime @default(now()) @map("created_at")
+
+  product  Product @relation(fields: [productId], references: [id], onDelete: Restrict)
+  customer User    @relation(fields: [customerId], references: [id], onDelete: Restrict)
+
+  // One review per customer per product — not in the original architecture.md
+  // draft, but without it a customer could flood a product's rating with
+  // repeated submissions; they can still edit their existing review instead
+  // (see ReviewsService.create's upsert-like behavior).
+  @@unique([productId, customerId])
+  @@index([productId])
+  @@map("product_reviews")
+}
+
+// ─────────────────────────────────────────────────────────────
+// Phase 7: Audit log & reporting
+// ─────────────────────────────────────────────────────────────
+
+// General-purpose admin/security trail — distinct from usage_logs
+// (dispensing) and stock_adjustments (restocking), which are already
+// domain-specific audit trails in their own right. This one covers the
+// administrative actions those two don't: who created a user, who
+// deactivated a product, who moderated a review, who deleted a brand.
+// Deliberately scoped to a handful of the most security/business-relevant
+// actions (see AuditLogService and its call sites) rather than every single
+// mutation in the system — instrumenting everything would bury the
+// meaningful entries in noise.
+model AuditLog {
+  id         Int      @id @default(autoincrement())
+  userId     Int?     @map("user_id")
+  action     String // e.g. 'user.create', 'product.status_change', 'review.moderate', 'brand.delete'
+  entityType String   @map("entity_type") // e.g. 'User', 'Product', 'ProductReview', 'Brand'
+  entityId   Int?     @map("entity_id")
+  oldValue   Json?    @map("old_value")
+  newValue   Json?    @map("new_value")
+  ipAddress  String?  @map("ip_address")
+  timestamp  DateTime @default(now())
+
+  // SetNull, not Restrict: unlike stock/usage history, losing track of
+  // *exactly which* user performed a long-past admin action isn't
+  // acceptable to block user deletion over — the log entry itself persists
+  // either way, matching AlertLog.acknowledgedBy's precedent.
+  user User? @relation(fields: [userId], references: [id], onDelete: SetNull)
+
+  @@index([entityType, entityId])
+  @@index([userId])
+  @@map("audit_log")
+}
